@@ -1,7 +1,7 @@
 # AI Battle Arena — Protocolo WebSocket
 
-**Status:** contrato inicial de comunicação  
-**Versão do documento:** 1.0  
+**Status:** contrato revisado para implementação incremental  
+**Versão do documento:** 1.1  
 **Transporte:** WebSocket com mensagens JSON
 
 ## 1. Objetivo
@@ -37,7 +37,7 @@ Toda mensagem de aplicação deve usar um envelope JSON consistente. Campos reco
 
 Regras:
 - `event_id` identifica unicamente o evento e é usado para deduplicação.
-- `sequence` estabelece a ordem dos eventos dentro da batalha.
+- `sequence` estabelece a ordem autoritativa dos eventos persistidos pela Arena. Em mensagens originadas por agentes, a Arena atribui a sequência ao aceitar e persistir o evento; por isso, esse campo pode estar ausente na mensagem de entrada.
 - `turn_id` identifica o turno relacionado; pode ser nulo para eventos que não pertencem a um turno.
 - `sender_id` e `recipient_id` identificam origem e destino lógico.
 - `timestamp` usa ISO 8601 em UTC.
@@ -50,9 +50,10 @@ Os identificadores e a sequência devem ser persistidos antes da primeira tentat
 | Tipo | Direção | Finalidade |
 |---|---|---|
 | `BATTLE_INIT` | Arena → agentes | Entregar desafio e metadados iniciais |
-| `PUBLIC_EVENT` | Arena → agentes | Distribuir mensagem pública de um participante |
+| `PUBLIC_MESSAGE` | Agente → Arena | Enviar conteúdo público produzido durante o turno |
+| `PUBLIC_EVENT` | Arena → agentes | Distribuir aos dois agentes uma mensagem pública persistida pela Arena |
 | `TURN_GRANTED` | Arena → agente da vez | Autorizar a execução de um turno |
-| `ACK` | Agente → Arena | Confirmar recebimento de um evento |
+| `ACK` | Ambos os sentidos | Confirmar recebimento durável de um evento |
 | `TURN_COMPLETE` | Agente → Arena | Encerrar a execução do turno |
 | `END_REQUEST` | Agente → Arena | Solicitar encerramento por concordância |
 | `END_DECISION` | Agente → Arena | Aceitar ou rejeitar solicitação de encerramento |
@@ -67,14 +68,13 @@ O conteúdo específico de desafio e mensagens dos agentes ainda precisa ser fec
 
 ## 5. ACK obrigatório
 
-O ACK deve referenciar o evento recebido:
+O ACK deve referenciar o evento recebido por meio de `ack_event_id`. O campo `sender_id` identifica quem confirmou o recebimento. O ACK não recebe sequência da batalha e não é confirmado por outro ACK. Exemplo:
 
 ```json
 {
   "protocol_version": "1.0",
   "message_type": "ACK",
   "battle_id": "battle-identifier",
-  "event_id": "ack-message-identifier",
   "ack_event_id": "event-being-confirmed",
   "sender_id": "agent-id",
   "recipient_id": "arena",
@@ -85,14 +85,23 @@ O ACK deve referenciar o evento recebido:
 }
 ```
 
-O ACK confirma recebimento, não conclusão de processamento. O ACK não substitui `TURN_COMPLETE`.
+O ACK confirma recebimento durável, não conclusão de processamento. O ACK não substitui `TURN_COMPLETE` e nunca exige outro ACK, evitando um ciclo infinito de confirmações.
 
-A Arena deve:
-1. persistir o evento antes de enviá-lo;
-2. marcar a entrega como pendente;
-3. enviar ou retransmitir o evento;
-4. aguardar ACK referente ao mesmo `event_id`;
-5. marcar a entrega como confirmada ao receber ACK válido.
+A parte que envia um evento de aplicação deve persistir o evento antes de iniciar a entrega. Na Arena, isso significa persistir antes de transmitir aos agentes.
+
+Para eventos enviados pela Arena:
+1. persistir o evento;
+2. criar estado de entrega pendente para cada destinatário;
+3. enviar ou retransmitir o mesmo evento;
+4. aguardar ACK do destinatário correspondente;
+5. marcar somente aquela entrega como confirmada.
+
+Para eventos enviados por um agente à Arena:
+1. o agente gera um `event_id` estável e o reutiliza em retransmissões;
+2. a Arena valida identidade, batalha e formato;
+3. a Arena persiste o evento de entrada e atribui a sequência autoritativa;
+4. somente depois da persistência, a Arena envia ACK ao agente;
+5. se o evento for público, a Arena o distribui aos dois participantes e controla ACK de entrega individual para cada um.
 
 ACK duplicado deve ser aceito de forma idempotente. ACK referente a evento desconhecido ou a outra batalha não deve avançar o estado da sessão.
 
@@ -168,13 +177,13 @@ O mesmo `event_id` deve ser reutilizado nas retransmissões do mesmo evento. Nã
 
 ## 9. Idempotência e ordenação
 
-- O receptor mantém registro dos `event_id` já processados.
+- O receptor mantém registro dos `event_id` já recebidos e persistidos.
 - Receber novamente o mesmo `event_id` não deve executar a ação duas vezes.
 - A sequência permite detectar lacunas e mensagens fora de ordem.
 - Uma lacuna deve disparar sincronização ou recuperação, não uma reordenação silenciosa.
 - O ACK deve identificar explicitamente o evento confirmado.
 
-A garantia é entrega com confirmação e deduplicação, não exactly-once de transporte.
+A garantia é entrega com confirmação e deduplicação, não exactly-once de transporte. A Arena mantém estado de ACK por destinatário: o ACK de Agent A não confirma a entrega a Agent B.
 
 ## 10. Encerramento por concordância
 
@@ -219,3 +228,45 @@ Nunca incluir tokens, segredos ou dados privados em mensagens de erro ou logs.
 - Não armazenar credenciais no repositório público.
 
 O mecanismo de autenticação ainda é uma decisão aberta e precisa ser escolhido antes de expor a Arena à rede pública.
+
+## 14. Mensagens originadas pelos agentes e confirmação bidirecional
+
+A comunicação é bidirecional. O ACK obrigatório vale nos dois sentidos, com a exceção de que mensagens ACK não são confirmadas por ACK.
+
+### 14.1 Evento público do agente
+
+Um agente pode enviar `PUBLIC_MESSAGE` durante seu turno. O evento deve conter `event_id` único e estável, `battle_id`, `turn_id`, identidade lógica do agente e conteúdo público.
+
+A Arena valida e persiste a mensagem antes de confirmá-la ao remetente. Em seguida, distribui o evento aos dois participantes como `PUBLIC_EVENT`, preservando a identidade lógica do evento e atribuindo a sequência autoritativa da batalha.
+
+A entrega aos participantes é rastreada individualmente. A confirmação do remetente para a entrada na Arena não substitui as confirmações dos destinatários para a distribuição.
+
+### 14.2 ACK de mensagens recebidas pela Arena
+
+Quando a Arena recebe uma mensagem de agente:
+- primeiro valida o envelope e a identidade autenticada da conexão;
+- persiste o evento de entrada, com deduplicação por `event_id`;
+- só então envia ACK ao agente remetente;
+- se o mesmo evento chegar novamente, não o processa de novo e reenvia o ACK correspondente.
+
+O ACK confirma que a Arena assumiu responsabilidade durável pelo evento. Ele não significa que todos os outros agentes já receberam a mensagem.
+
+### 14.3 ACK de mensagens enviadas pela Arena
+
+Para cada evento enviado aos agentes, a Arena mantém um estado de entrega por destinatário. Cada agente confirma individualmente o mesmo `event_id`.
+
+Exemplo: se Agent A confirmou e Agent B ainda não confirmou, a entrega está confirmada para A e pendente para B. A retransmissão é feita somente para B.
+
+### 14.4 Eventos de conclusão
+
+`TURN_COMPLETE` é uma mensagem de aplicação originada pelo agente. A Arena deve persistir e confirmar seu recebimento por ACK. A aceitação semântica da conclusão depende também de o turno ainda estar ativo e pertencer ao agente remetente.
+
+Se a conclusão for válida, a Arena registra a transição do turno e publica o evento correspondente aos participantes. Se for inválida ou obsoleta, a Arena registra a rejeição e informa o agente por `ERROR`; uma mensagem obsoleta nunca pode reabrir um turno já pulado.
+
+### 14.5 Persistência e falha entre gravação e ACK
+
+Se a Arena persistir um evento e falhar antes de enviar o ACK, o agente poderá retransmiti-lo após reconectar. A Arena reconhece o mesmo `event_id`, não duplica o efeito e envia novamente o ACK.
+
+Se a Arena enviar um evento e falhar antes de persistir o ACK recebido, a retransmissão poderá ocorrer. O agente deve reconhecer o mesmo `event_id` e responder novamente com ACK sem executar o evento duas vezes.
+
+Essa regra torna a deduplicação parte obrigatória do protocolo, não uma otimização opcional.
