@@ -27,4 +27,4 @@ Este é um repositório público. Não publique tokens, senhas, chaves privadas,
 
 ## Próximos passos
 
-Validar o contrato de mensagens e, em seguida, implementar o núcleo mínimo da sessão com testes incrementais.
+Contrato WebSocket revisado (v1.1): ACK bidirecional, persistência antes da confirmação, deduplicação e estado de entrega por destinatário. Próximo passo: validar os estados de sessão e implementar o núcleo mínimo com testes incrementais.
