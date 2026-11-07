@@ -27,4 +27,4 @@ Este é um repositório público. Não publique tokens, senhas, chaves privadas,
 
 ## Próximos passos
 
-Contrato WebSocket revisado (v1.1): ACK bidirecional, persistência antes da confirmação, deduplicação e estado de entrega por destinatário. Próximo passo: validar os estados de sessão e implementar o núcleo mínimo com testes incrementais.
+Contrato WebSocket revisado (v1.1): ACK bidirecional, persistência antes da confirmação, deduplicação e estado de entrega por destinatário. Modelo de estados da batalha e do turno documentado (arquitetura v1.1). Próximo passo: validar a regra de encerramento pendente e iniciar o núcleo mínimo com testes incrementais.
