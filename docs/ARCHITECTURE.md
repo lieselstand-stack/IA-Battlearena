@@ -1,7 +1,7 @@
 # AI Battle Arena — Especificação de Arquitetura
 
 **Status:** especificação inicial aprovada para orientar a implementação  
-**Versão do documento:** 1.0  
+**Versão do documento:** 1.1  
 **Branch de documentação:** `docs/architecture-v1`
 
 ## 1. Objetivo
@@ -214,3 +214,70 @@ Cada etapa deve ter testes próprios, commit identificável e atualização brev
 ## 12. Princípio de implementação
 
 Preservar simplicidade e compatibilidade. Reutilizar estruturas existentes sempre que possível. Modularizar quando reduzir a complexidade real, não por convenção. Nenhuma etapa deve avançar sem validar o comportamento da etapa anterior.
+
+## 13. Modelo mínimo de estados da sessão
+
+Para evitar misturar estado da batalha com estado de entrega de mensagens, a implementação deve manter esses conceitos separados. Não é necessário criar um subsistema complexo: são estados persistidos e transições controladas pelo núcleo da sessão.
+
+### 13.1 Estado da batalha
+
+| Estado | Significado |
+|---|---|
+| `CREATED` | Sessão registrada, ainda sem conexões prontas |
+| `CONNECTING` | Arena estabelecendo as conexões com os dois agentes |
+| `SYNCHRONIZING` | Conexões disponíveis; desafio, histórico e estado inicial sendo confirmados |
+| `ACTIVE` | Batalha em andamento |
+| `END_PENDING` | Existe solicitação de encerramento aguardando decisão do outro agente |
+| `RECOVERING` | Arena reiniciou e está restaurando conexões e estado persistido |
+| `FINISHED` | Encerramento confirmado pelos dois agentes |
+
+`RECOVERING` é transitório: após sincronização bem-sucedida, a sessão retorna ao estado persistido anterior, sem criar uma nova batalha.
+
+### 13.2 Fase do turno
+
+A fase do turno é independente do estado da batalha:
+
+| Fase | Significado |
+|---|---|
+| `IDLE` | Nenhum turno está aguardando ACK ou em execução |
+| `WAITING_ACK` | `TURN_GRANTED` foi persistido e enviado; Arena aguarda ACK do agente titular |
+| `RUNNING` | ACK válido recebido; relógio de execução está ativo |
+
+Quando o agente envia `TURN_COMPLETE`, ou quando ocorre timeout de execução após ACK, a Arena registra o resultado do turno e prepara o próximo. O histórico registra se o turno foi concluído ou pulado; não é necessário manter estados permanentes extras para isso.
+
+### 13.3 Estado de entrega
+
+Cada evento enviado possui estado de entrega independente para cada destinatário:
+
+- `PENDING`: evento persistido e aguardando ACK;
+- `ACKNOWLEDGED`: ACK válido recebido daquele destinatário.
+
+Uma retransmissão não cria um novo evento nem uma nova sequência. A entrega de um agente não altera o estado de entrega do outro.
+
+### 13.4 Transições principais
+
+1. `CREATED` → `CONNECTING` quando o operador inicia a sessão.
+2. `CONNECTING` → `SYNCHRONIZING` quando as duas conexões estão estabelecidas.
+3. `SYNCHRONIZING` → `ACTIVE` quando desafio e estado inicial estão confirmados.
+4. `ACTIVE` + `IDLE` → `WAITING_ACK` quando a Arena autoriza o próximo agente.
+5. `WAITING_ACK` → `RUNNING` somente após ACK válido de `TURN_GRANTED`.
+6. `WAITING_ACK` permanece nessa fase durante falhas de entrega e retransmissões; não há SKIP por falta de ACK.
+7. `RUNNING` → próximo turno quando chega `TURN_COMPLETE` válido.
+8. `RUNNING` → próximo turno quando o timeout de execução expira; registrar SKIP.
+9. `ACTIVE` → `END_PENDING` quando uma solicitação de encerramento é registrada.
+10. `END_PENDING` → `FINISHED` somente após concordância explícita do outro agente.
+11. `END_PENDING` → `ACTIVE` se a solicitação for rejeitada.
+12. Qualquer sessão não finalizada → `RECOVERING` após reinicialização; depois da sincronização, restaurar o estado anterior.
+
+### 13.5 Transições que não podem ocorrer
+
+- Não passar de `WAITING_ACK` para SKIP apenas porque o ACK não chegou.
+- Não iniciar o relógio de execução antes do ACK de `TURN_GRANTED`.
+- Não aceitar `TURN_COMPLETE` de agente que não é o titular do turno.
+- Não aceitar conclusão de um `turn_id` já concluído ou pulado.
+- Não passar para `FINISHED` com apenas uma solicitação de encerramento.
+- Não apagar eventos nem gerar uma nova sessão durante recuperação.
+
+### 13.6 Decisão ainda necessária
+
+A documentação ainda não define se, enquanto a batalha está em `END_PENDING`, o turno atual continua normalmente ou se a Arena pausa a concessão de novos turnos até a resposta do outro agente. Essa regra deve ser decidida antes de implementar o fluxo de encerramento; não deve ser presumida pelo código.
